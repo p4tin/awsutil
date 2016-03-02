@@ -1,0 +1,11 @@
+{  
+    "skuId":"37813193",
+    "originalRetail":750,
+    "currentRetail":750,
+    "currencyCode":"CNY",
+    "siteId":"fp-cn",
+    "startDate":"2014-08-07",
+    "endDate":"2099-01-01",
+    "batchTime":"2014-08-19T14:12:26",
+    "foo": "temp"
+}
