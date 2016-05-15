@@ -2,19 +2,23 @@ package main
 
 import (
 	"os"
-	"io/ioutil"
-	"github.com/codegangsta/cli"
-
 	"fmt"
+	"io/ioutil"
+
+	"github.com/codegangsta/cli"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/aws/aws-sdk-go/service/sns"
 )
 
 var queueName 		string
 var svc 			*sqs.SQS
+var sns_svc 			*sns.SNS
 var url 			string
 var attrib 			string
+
+var topicArn 			string
 
 func main() {
 	app := cli.NewApp()
@@ -57,9 +61,6 @@ func main() {
 			queue = c.Args()[0]
 		}
 		action := c.String("action")
-		if queue == "" {
-			action = "help"
-		}
 		server := c.String("server")
 		amazonId := c.String("amazonId")
 		fileBody := c.String("fileBody")
@@ -82,6 +83,14 @@ func main() {
 		case "receive":
 			receiveMessage()
 			break;
+		case "sns":
+			createTopicArn(queue, amazonId)
+			SendSnsMsg(fileBody, strBody)
+			break;
+		case "list-queues":
+			ListQueues()
+		case "list-topics":
+			ListTopics()
 		default:
 			fmt.Println("Unrecognized action - try `sqsutil -h` for help.")
 		}
@@ -93,9 +102,11 @@ func createEndpoint(queue string, server string, amazonId string) {
 	if amazonId == "" {
 		url = "http://" + server + "/queue/" + queue
 		svc = sqs.New(session.New(), &aws.Config{Endpoint: aws.String("http://" + server), Region: aws.String("us-east-1")})
+		sns_svc = sns.New(session.New(), &aws.Config{Endpoint: aws.String("http://" + server), Region: aws.String("yopa-local")})
 	} else {
 		url = "https://" + server + "/" + amazonId + "/" + queue
 		svc = sqs.New(session.New(), &aws.Config{Region: aws.String("us-east-1")})
+		sns_svc = sns.New(session.New(), &aws.Config{Region: aws.String("us-east-1")})
 	}
 	queueName = queue
 }
@@ -188,6 +199,105 @@ func purgeQueue() {
 	}
 	fmt.Println(resp)
 }
+
+func createTopicArn(topic string, amazonId string) {
+	if amazonId == "" {
+		topicArn = "arn:aws:sns:yopa-local:000000000000:" + topic
+	} else {
+		topicArn = "arn:aws:sns:us-east-1:" + amazonId + ":" + topic
+	}
+}
+
+func ListQueues() {
+	params := &sqs.ListQueuesInput{}
+	resp, err := svc.ListQueues(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return
+	}
+
+	// Pretty-print the response data.
+	for _, queue := range resp.QueueUrls {
+		fmt.Println(*queue)
+	}
+}
+
+func ListTopics() {
+	params := &sns.ListTopicsInput{
+		NextToken: aws.String(""),
+	}
+	resp, err := sns_svc.ListTopics(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return
+	}
+	// Pretty-print the response data.
+	for _, arn := range resp.Topics {
+		fmt.Println(*arn.TopicArn)
+		params := &sns.ListSubscriptionsByTopicInput{
+			TopicArn:  aws.String(*arn.TopicArn), // Required
+		}
+		resp, err := sns_svc.ListSubscriptionsByTopic(params)
+
+		if err != nil {
+			// Print the error, cast err to awserr.Error to get the Code and
+			// Message from an error.
+			fmt.Println(err.Error())
+			return
+		}
+
+		if len(resp.Subscriptions) > 0 {
+			// Pretty-print the response data.
+			fmt.Println("Subscriptions:")
+			for _, subs := range resp.Subscriptions {
+				if *subs.Protocol == "sqs" {
+					fmt.Println("\t", *subs.Endpoint)
+				}
+			}
+		}
+	}
+
+}
+
+func SendSnsMsg(file string, str string) {
+	msg := "Testing 1,2,3,..."
+	if str != "" {
+		msg = str
+	} else if file != "" {
+		dat, err := ioutil.ReadFile(file)
+		check(err)
+		msg = string(dat)
+	}
+
+	//Create a session object to talk to SNS (also make sure you have your key and secret setup in your .aws/credentials file)
+	//svc := sns.New(session.New())
+	// params will be sent to the publish call included here is the bare minimum params to send a message.
+	params := &sns.PublishInput{
+		Message: aws.String(msg), // This is the message itself (can be XML / JSON / Text - anything you want)
+		TopicArn: aws.String(topicArn), //Get this from the Topic in the AWS console.
+
+	}
+
+	resp, err := sns_svc.Publish(params)   //Call to puclish the message
+
+	if err != nil {
+		//Check for errors
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return
+	}
+
+	// Pretty-print the response data.
+	fmt.Println(resp)
+}
+
 
 func check(e error) {
 	if e != nil {
