@@ -10,20 +10,34 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/aws/aws-sdk-go/service/sns"
+	"github.com/joho/godotenv"
+	"strings"
 )
 
 var queueName 		string
-var svc 			*sqs.SQS
-var sns_svc 			*sns.SNS
-var url 			string
-var attrib 			string
+var sqs_svc             *sqs.SQS
+var sns_svc 		*sns.SNS
 
-var topicArn 			string
+var aws_region		string
+var sqs_url 		string
+var sns_url 		string
+
+var attrib 		string
+var topicArn		string
+
+func init() {
+	err := godotenv.Load()
+	check(err)
+
+	sqs_url = os.Getenv("SQS_URL")
+	sns_url = os.Getenv("SNS_URL")
+	aws_region = os.Getenv("AWS_REGION")
+}
 
 func main() {
 	app := cli.NewApp()
 
-	app.Version = "1.0"
+	app.Version = "1.1"
 	app.Name = "sqsutil"
 	app.Usage = "Utility to work with SQS/ElasticMq Queues"
 
@@ -33,16 +47,16 @@ func main() {
 			Value: "depth",
 			Usage: "action to perform on the queue (depth, create, purge, send, receive)",
 		},
-		cli.StringFlag{
-			Name: "server, s",
-			Value: "localhost:9324",
-			Usage: "server and port number for the request",
-		},
-		cli.StringFlag{
-			Name: "amazonId, i",
-			Value: "",
-			Usage: "Amazon ID for the request",
-		},
+		//cli.StringFlag{
+		//	Name: "server, s",
+		//	Value: "localhost:9324",
+		//	Usage: "server and port number for the request",
+		//},
+		//cli.StringFlag{
+		//	Name: "amazonId, i",
+		//	Value: "",
+		//	Usage: "Amazon ID for the request",
+		//},
 		cli.StringFlag{
 			Name: "stringBody, t",
 			Value: "",
@@ -60,37 +74,42 @@ func main() {
 		if len(c.Args()) > 0 {
 			queue = c.Args()[0]
 		}
+		topicName := ""
+		if len(c.Args()) > 1 {
+			topicName = c.Args()[1]
+		}
 		action := c.String("action")
 		server := c.String("server")
 		amazonId := c.String("amazonId")
 		fileBody := c.String("fileBody")
 		strBody := c.String("stringBody")
 		createEndpoint(queue, server, amazonId)
-		//println("Server", server, "Queue", queue, "Action:", action, "url", url, "queue", queue)
 		switch action {
-		case "create":
-			createSQSQueue()
-			break
-		case "depth":
-			getSQSQueueDepth()
-			break
-		case "purge":
-			purgeQueue()
-			break;
-		case "send":
-			sendMessage(fileBody, strBody)
-			break;
-		case "receive":
-			receiveMessage()
-			break;
-		case "sns":
-			createTopicArn(queue, amazonId)
-			SendSnsMsg(fileBody, strBody)
-			break;
 		case "list-queues":
 			ListQueues()
+		case "create-queue":
+			createSQSQueue()
+		case "depth":
+			getSQSQueueDepth()
+		case "purge":
+			purgeQueue()
+		case "send":
+			sendMessage(fileBody, strBody)
+		case "receive":
+			receiveMessage()
+		case "delete-queue":
+			DeleteQueue()
 		case "list-topics":
 			ListTopics()
+		case "create-topic":
+			CreateTopic(queue)
+		case "create-subscription":
+			CreateSqsSubscription(topicName)
+		case "send-topic":
+			createTopicArn(queue, amazonId)
+			SendSnsMsg(fileBody, strBody)
+		case "delete-topic":
+			DeleteTopic(topicName)
 		default:
 			fmt.Println("Unrecognized action - try `sqsutil -h` for help.")
 		}
@@ -100,22 +119,39 @@ func main() {
 
 func createEndpoint(queue string, server string, amazonId string) {
 	if amazonId == "" {
-		url = "http://" + server + "/queue/" + queue
-		svc = sqs.New(session.New(), &aws.Config{Endpoint: aws.String("http://" + server), Region: aws.String("us-east-1")})
-		sns_svc = sns.New(session.New(), &aws.Config{Endpoint: aws.String("http://" + server), Region: aws.String("yopa-local")})
+		sqs_svc = sqs.New(session.New(), &aws.Config{Endpoint: aws.String(sqs_url), Region: aws.String(aws_region)})
+		sqs_url = sqs_url + "/queue/" + queue
+		sns_svc = sns.New(session.New(), &aws.Config{Endpoint: aws.String(sns_url), Region: aws.String(aws_region)})
 	} else {
-		url = "https://" + server + "/" + amazonId + "/" + queue
-		svc = sqs.New(session.New(), &aws.Config{Region: aws.String("us-east-1")})
+		sqs_url = "https://" + server + "/" + amazonId + "/" + queue
+		sqs_svc = sqs.New(session.New(), &aws.Config{Region: aws.String("us-east-1")})
 		sns_svc = sns.New(session.New(), &aws.Config{Region: aws.String("us-east-1")})
 	}
 	queueName = queue
+}
+
+func ListQueues() {
+	params := &sqs.ListQueuesInput{}
+	resp, err := sqs_svc.ListQueues(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return
+	}
+
+	// Pretty-print the response data.
+	for _, queue := range resp.QueueUrls {
+		fmt.Println(*queue)
+	}
 }
 
 func createSQSQueue() {
 	params := &sqs.CreateQueueInput{
 		QueueName: aws.String(queueName), // Required
 	}
-	resp, err := svc.CreateQueue(params)
+	resp, err := sqs_svc.CreateQueue(params)
 
 	if err != nil {
 		fmt.Println(err.Error())
@@ -124,17 +160,35 @@ func createSQSQueue() {
 	fmt.Println(resp)
 }
 
+func GetQueueArn() string {
+	params := &sqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(sqs_url), // Required
+		AttributeNames: []*string{
+			aws.String("QueueArn"), // Required
+		},
+	}
+	resp, err := sqs_svc.GetQueueAttributes(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return ""
+	}
+
+	return *resp.Attributes["QueueArn"]
+}
 
 func getSQSQueueDepth() {
 
 	attrib = "ApproximateNumberOfMessages"
 	sendParams := &sqs.GetQueueAttributesInput{
-		QueueUrl: aws.String(url), // Required
+		QueueUrl: aws.String(sqs_url), // Required
 		AttributeNames: []*string{
 			&attrib, // Required
 		},
 	}
-	resp2, sendErr := svc.GetQueueAttributes(sendParams)
+	resp2, sendErr := sqs_svc.GetQueueAttributes(sendParams)
 	if sendErr != nil {
 		fmt.Println("Depth: " + sendErr.Error())
 		return
@@ -153,9 +207,9 @@ func sendMessage(file string, str string) {
 	}
 	params := &sqs.SendMessageInput{
 		MessageBody:  aws.String(msg), // Required
-		QueueUrl:     aws.String(url), // Required
+		QueueUrl:     aws.String(sqs_url), // Required
 	}
-	resp, err := svc.SendMessage(params)
+	resp, err := sqs_svc.SendMessage(params)
 
 	if err != nil {
 		fmt.Println(err.Error())
@@ -168,9 +222,9 @@ func sendMessage(file string, str string) {
 
 func receiveMessage() {
 	params := &sqs.ReceiveMessageInput{
-		QueueUrl: aws.String(url), // Required
+		QueueUrl: aws.String(sqs_url), // Required
 	}
-	resp, err := svc.ReceiveMessage(params)
+	resp, err := sqs_svc.ReceiveMessage(params)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
@@ -179,24 +233,41 @@ func receiveMessage() {
 		for _, msg := range resp.Messages {
 			fmt.Println(msg)
 			delParams := &sqs.DeleteMessageInput{
-				QueueUrl:      aws.String(url),                        // Required
+				QueueUrl:      aws.String(sqs_url),                        // Required
 				ReceiptHandle: aws.String(*msg.ReceiptHandle), // Required
 			}
-			svc.DeleteMessage(delParams)
+			sqs_svc.DeleteMessage(delParams)
 		}
 	}
 }
 
 func purgeQueue() {
 	params := &sqs.PurgeQueueInput{
-		QueueUrl: aws.String(url), // Required
+		QueueUrl: aws.String(sqs_url), // Required
 	}
-	resp, err := svc.PurgeQueue(params)
+	resp, err := sqs_svc.PurgeQueue(params)
 
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
+	fmt.Println(resp)
+}
+
+func DeleteQueue() {
+	params := &sqs.DeleteQueueInput{
+		QueueUrl: aws.String(sqs_url), // Required
+	}
+	resp, err := sqs_svc.DeleteQueue(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return
+	}
+
+	// Pretty-print the response data.
 	fmt.Println(resp)
 }
 
@@ -208,21 +279,26 @@ func createTopicArn(topic string, amazonId string) {
 	}
 }
 
-func ListQueues() {
-	params := &sqs.ListQueuesInput{}
-	resp, err := svc.ListQueues(params)
+
+func GetTopicArn(topicName string) string {
+	params := &sns.ListTopicsInput{
+		NextToken: aws.String(""),
+	}
+	resp, err := sns_svc.ListTopics(params)
 
 	if err != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
 		// Message from an error.
 		fmt.Println(err.Error())
-		return
+		return ""
 	}
-
 	// Pretty-print the response data.
-	for _, queue := range resp.QueueUrls {
-		fmt.Println(*queue)
+	for _, arn := range resp.Topics {
+		if strings.HasSuffix(*arn.TopicArn, topicName){
+			return *arn.TopicArn
+		}
 	}
+	return ""
 }
 
 func ListTopics() {
@@ -265,6 +341,42 @@ func ListTopics() {
 
 }
 
+func CreateTopic(name string) {
+	params := &sns.CreateTopicInput{
+		Name: aws.String(name), // Required
+	}
+	resp, err := sns_svc.CreateTopic(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return
+	}
+
+	// Pretty-print the response data.
+	fmt.Println(resp)
+}
+
+func CreateSqsSubscription(topicName string) {
+	params := &sns.SubscribeInput{
+		Protocol: aws.String("sqs"),
+		TopicArn: aws.String(GetTopicArn(topicName)),
+		Endpoint: aws.String(GetQueueArn()),
+	}
+	resp, err := sns_svc.Subscribe(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return
+	}
+
+	// Pretty-print the response data.
+	fmt.Println(resp)
+}
+
 func SendSnsMsg(file string, str string) {
 	msg := "Testing 1,2,3,..."
 	if str != "" {
@@ -298,6 +410,22 @@ func SendSnsMsg(file string, str string) {
 	fmt.Println(resp)
 }
 
+func DeleteTopic(topicName string) {
+	params := &sns.DeleteTopicInput{
+		TopicArn: aws.String(GetTopicArn(topicName)), // Required
+	}
+	resp, err := sns_svc.DeleteTopic(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return
+	}
+
+	// Pretty-print the response data.
+	fmt.Println(resp)
+}
 
 func check(e error) {
 	if e != nil {
